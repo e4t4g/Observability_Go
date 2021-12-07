@@ -5,13 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"go.uber.org/zap"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"strconv"
 )
-
-//var logger *zap.Logger
 
 //точка входа
 func main() {
@@ -21,66 +20,60 @@ func main() {
 	}
 	defer logger.Sync()
 
-	logger.Info("start")
+	appLogger := logger.Sugar().Named("botLogg")
 
+	appLogger.Info("start echo bot")
 
 	botToken := "2102830230:AAH4ENaEOafawyYRxICfy5-ZPfWrqhHtMEg"
 	//https://api.telegram.org/bot<token>/METHOD_NAME
 	botApi := "https://api.telegram.org/bot"
-	botUrl := botApi+botToken
+	botUrl := botApi + botToken
 	offset := 0
 
 	for {
-		updates, err := getUpdates(botUrl, offset)
+		updates, err := getUpdates(botUrl, appLogger.With("getUpdates"), offset)
 		if err != nil {
-			msg := fmt.Sprintf("func getUpdates was failed", err)
-			logger.Error(msg)
+			appLogger.Fatal("url is not set")
 		}
 		for _, update := range updates {
-			err = respond(botUrl, update)
+			err = respond(botUrl, appLogger.With("respond"), update)
 			offset = update.UpdateId + 1
-			logger.Info("new update")
-			//msg := fmt.Sprintf("#: ", offset)
-			//logger.Info(msg)
+			appLogger.Info("got a new request")
 			if err != nil {
-				msg := fmt.Sprintf("loop is not working", err)
-				logger.Error(msg)
+				appLogger.Errorw("update error", "err", err)
 			}
 		}
-
 		fmt.Println(updates)
 	}
-
-
 }
 
 //запрос обновлений
-func getUpdates(botUrl string, offset int) ([]Update, error){
-	logger, err := zap.NewProduction()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer logger.Sync()
+func getUpdates(botUrl string, appLogger *zap.SugaredLogger, offset int) ([]Update, error) {
 
-	resp, err := http.Get(botUrl+ "/getUpdates" + "?offset=" + strconv.Itoa(offset))
+	resp, err := http.Get(botUrl + "/getUpdates" + "?offset=" + strconv.Itoa(offset))
 	if err != nil {
 		return nil, err
 	}
-	//defer  log.Fatal(resp.Body.Close())
-	defer  resp.Body.Close()
+	//defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+
+		}
+	}(resp.Body)
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		msg := fmt.Sprintf("#70 body error" , err)
-		logger.Error(msg)
+		msg := fmt.Sprintf("body error", err)
+		appLogger.Error(msg)
 		return nil, err
 	}
 	var restResponse RestResponse
 
 	err = json.Unmarshal(body, &restResponse)
 	if err != nil {
-		msg := fmt.Sprintf("#79 json.Unmarshal", err)
-		logger.Error(msg)
+		msg := fmt.Sprintf("json.Unmarshal", err)
+		appLogger.Error(msg)
 		return nil, err
 	}
 
@@ -89,29 +82,23 @@ func getUpdates(botUrl string, offset int) ([]Update, error){
 }
 
 //ответ на обновления
-func respond(botUrl string, update Update) error {
-	logger, err := zap.NewProduction()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer logger.Sync()
+func respond(botUrl string, appLogger *zap.SugaredLogger, update Update) error {
 
 	var botMessage BotMessage
 	botMessage.ChatId = update.Message.Chat.ChatId
 	botMessage.Text = update.Message.Text
 	buf, err := json.Marshal(botMessage)
 	if err != nil {
-		msg := fmt.Sprintf("#100 buff error", err)
-		logger.Error(msg)
+		msg := fmt.Sprintf("buff error", err)
+		appLogger.Error(msg)
 		return err
 	}
-	_, err = http.Post(botUrl + "/sendMessage", "application/json", bytes.NewBuffer(buf))
+	_, err = http.Post(botUrl+"/sendMessage", "application/json", bytes.NewBuffer(buf))
 	if err != nil {
-		msg := fmt.Sprintf("#106 http.Post error", err)
-		logger.Error(msg)
+		msg := fmt.Sprintf("http.Post error", err)
+		appLogger.Error(msg)
 		return err
 	}
-
-
 	return nil
 }
+
