@@ -2,87 +2,126 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"go.uber.org/zap"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
+
+	"github.com/opentracing/opentracing-go"
+	"github.com/opentracing/opentracing-go/log"
+	"github.com/spf13/pflag"
 )
+
+type bot struct {
+	logger *zap.SugaredLogger
+}
 
 //точка входа
 func main() {
+	var configParse string
+
+	pflag.StringVar(&configParse, "config", ".config.yml", "config file path")
+
+	pflag.Parse()
+
+	pwd, _ := os.Getwd()
+	config, err := InitConfig(pwd + configParse)
+	if err != nil {
+		panic(err)
+	}
+
 	logger, err := zap.NewProduction()
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	defer logger.Sync()
 
-	appLogger := logger.Sugar().Named("botLogg")
+	b := bot{
+		logger: logger.Sugar(),
+	}
 
-	appLogger.Info("start echo bot")
-
-	botToken := "2102830230:AAH4ENaEOafawyYRxICfy5-ZPfWrqhHtMEg"
 	//https://api.telegram.org/bot<token>/METHOD_NAME
-	botApi := "https://api.telegram.org/bot"
-	botUrl := botApi + botToken
+
+	botUrl := config.BotApi + config.BotToken
+	fmt.Println(botUrl)
 	offset := 0
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
 	for {
-		updates, err := getUpdates(botUrl, appLogger.With("getUpdates"), offset)
+		ctx, updates, err := b.getUpdates(ctx, botUrl, offset)
 		if err != nil {
-			appLogger.Fatal("url is not set")
+			b.logger.Fatal("url is not set")
 		}
 		for _, update := range updates {
-			err = respond(botUrl, appLogger.With("respond"), update)
+			err = b.respond(ctx, botUrl, update)
 			offset = update.UpdateId + 1
-			appLogger.Info("got a new request")
+			b.logger.Info("got a new request")
 			if err != nil {
-				appLogger.Errorw("update error", "err", err)
+				b.logger.Errorw("update error", "err", err)
 			}
 		}
+
 		fmt.Println(updates)
 	}
 }
 
 //запрос обновлений
-func getUpdates(botUrl string, appLogger *zap.SugaredLogger, offset int) ([]Update, error) {
+func (b *bot) getUpdates(ctx context.Context, botUrl string, offset int) (context.Context, []Update, error) {
+	span, ctx := opentracing.StartSpanFromContext(ctx, "getUpdates")
+	defer span.Finish()
 
 	resp, err := http.Get(botUrl + "/getUpdates" + "?offset=" + strconv.Itoa(offset))
 	if err != nil {
-		return nil, err
+		b.logger.Errorw("error gert updates", err)
+		span.LogFields(
+			log.Error(err),
+		)
+		return nil, nil, err
 	}
-	//defer resp.Body.Close()
+
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
-
 		}
 	}(resp.Body)
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		msg := fmt.Sprintf("body error", err)
-		appLogger.Error(msg)
-		return nil, err
+		b.logger.Error(msg)
+		span.LogFields(
+			log.Error(err),
+		)
+		return nil, nil, err
 	}
 	var restResponse RestResponse
 
 	err = json.Unmarshal(body, &restResponse)
 	if err != nil {
 		msg := fmt.Sprintf("json.Unmarshal", err)
-		appLogger.Error(msg)
-		return nil, err
+		b.logger.Error(msg)
+		span.LogFields(
+			log.Error(err),
+		)
+		return nil, nil, err
 	}
 
-	return restResponse.Result, nil
+	return ctx, restResponse.Result, nil
 
 }
 
 //ответ на обновления
-func respond(botUrl string, appLogger *zap.SugaredLogger, update Update) error {
+func (b *bot) respond(ctx context.Context, botUrl string, update Update) error {
+	span, ctx := opentracing.StartSpanFromContext(ctx, "get respond")
+	defer span.Finish()
 
 	var botMessage BotMessage
 	botMessage.ChatId = update.Message.Chat.ChatId
@@ -90,15 +129,15 @@ func respond(botUrl string, appLogger *zap.SugaredLogger, update Update) error {
 	buf, err := json.Marshal(botMessage)
 	if err != nil {
 		msg := fmt.Sprintf("buff error", err)
-		appLogger.Error(msg)
+		b.logger.Error(msg)
 		return err
 	}
+
 	_, err = http.Post(botUrl+"/sendMessage", "application/json", bytes.NewBuffer(buf))
 	if err != nil {
 		msg := fmt.Sprintf("http.Post error", err)
-		appLogger.Error(msg)
+		b.logger.Error(msg)
 		return err
 	}
 	return nil
 }
-
