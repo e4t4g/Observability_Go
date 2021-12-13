@@ -12,7 +12,10 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"time"
 
+	"github.com/go-redis/cache/v8"
+	"github.com/go-redis/redis/v8"
 	"github.com/opentracing/opentracing-go"
 	"github.com/opentracing/opentracing-go/log"
 	"github.com/spf13/pflag"
@@ -20,10 +23,12 @@ import (
 
 type bot struct {
 	logger *zap.SugaredLogger
+	cache  *cache.Cache
 }
 
 //точка входа
 func main() {
+
 	var configParse string
 
 	pflag.StringVar(&configParse, "config", ".config.yml", "config file path")
@@ -55,21 +60,40 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
+	b.InitCache()
+
 	for {
 		ctx, updates, err := b.getUpdates(ctx, botUrl, offset)
 		if err != nil {
 			b.logger.Fatal("url is not set")
 		}
 		for _, update := range updates {
-			err = b.respond(ctx, botUrl, update)
-			offset = update.UpdateId + 1
-			b.logger.Info("got a new request")
-			if err != nil {
-				b.logger.Errorw("update error", "err", err)
+			err := b.cache.Get(ctx, botUrl, &update)
+			key := fmt.Sprintf("user_articles:%s", update)
+			switch err {
+			case cache.ErrCacheMiss:
+				err = b.respond(ctx, botUrl, update)
+				offset = update.UpdateId + 1
+				b.logger.Info("got a new request")
+				if err != nil {
+					b.logger.Errorw("update error", "err", err)
+				}
+				fmt.Println(updates)
+				err = b.cache.Set(&cache.Item{
+					Ctx:   ctx,
+					Key:   key,
+					Value: update,
+					TTL:   time.Hour,
+				})
+				if err != nil {
+				}
+
+			case nil:
+				fmt.Println(updates)
 			}
+
 		}
 
-		fmt.Println(updates)
 	}
 }
 
@@ -140,4 +164,17 @@ func (b *bot) respond(ctx context.Context, botUrl string, update Update) error {
 		return err
 	}
 	return nil
+}
+
+func (b *bot) InitCache() {
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       0,
+	})
+
+	b.cache = cache.New(&cache.Options{
+		Redis:      rdb,
+		LocalCache: cache.NewTinyLFU(24, time.Hour),
+	})
 }
